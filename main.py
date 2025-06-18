@@ -93,7 +93,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 data = None
 
             q1 = ClientMessage(client, None)
-            if data is None or len(data) == 0:
+            if data is None or len(data) == 1 and data[0] in (10, 13):
                 logger.warning(f"No/Empty message received from {peername}, skipping")
             else:
                 q1.message = Message(datetime.now(), data.decode().strip())
