@@ -19,17 +19,29 @@ class Message:
         if isinstance(value, Message):
             return self.timestamp == value.timestamp and self.content == value.content
         return False
+    
+    def __hash__(self):
+        return hash((self.timestamp, self.content))
 
 
 @dataclass
 class Client:
     ip: str
     port: int
+    stream_writer: asyncio.StreamWriter = None
+    stream_reader: asyncio.StreamReader = None
+
+    def __str__(self):
+        return f"{self.ip}:{self.port}"
 
     def __eq__(self, value):
         if isinstance(value, Client):
             return self.ip == value.ip and self.port == value.port
         return False
+    
+    def __hash__(self):
+        return hash((self.ip, self.port))
+
 
 @dataclass
 class ClientMessage:
@@ -37,8 +49,8 @@ class ClientMessage:
     message: Message
 
 
-clients: dict[tuple, Client] = {}
-message_queue: asyncio.Queue = asyncio.Queue()
+broadcast_queue: asyncio.Queue[ClientMessage]
+connected_clients: set[Client] = set()
 
 
 def setup_logging():
@@ -76,61 +88,91 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
     logger = logging.getLogger(LOGGER_NAME)
     read_limit = 1024
 
-    peername: tuple = writer.get_extra_info("peername")
-    if peername not in clients:
-        logger.debug(f"Client peername: {peername}")
-        clients[peername] = Client(peername[0], peername[1])
-        logger.info(f"Accepted connection from peername: {peername}")
-
-    client: Client = clients[peername]
-    messages: list[Message] = []
+    client: Client = Client(*writer.get_extra_info("peername"))
+    if client not in connected_clients:
+        logger.info(f"Accepted connection from {client}")
+        client.stream_reader = reader
+        client.stream_writer = writer
+        connected_clients.add(client)
 
     try:
         while True:
             try:
-                data: bytes = await asyncio.wait_for(reader.read(read_limit), 1)
+                data: bytes = await reader.read(read_limit)
             except asyncio.TimeoutError:
                 data = None
 
-            q1 = ClientMessage(client, None)
             if data is None or len(data) == 1 and data[0] in (10, 13):
-                logger.warning(f"No/Empty message received from {peername}, skipping")
-            else:
-                q1.message = Message(datetime.now(), data.decode().strip())
-                logger.info(f"Received from {q1.client}: {q1.message.content}")
-                messages.append(q1.message)
-                await message_queue.put(q1)
-
-            try:
-                q2: ClientMessage = message_queue.get_nowait()
-            except asyncio.QueueEmpty:
+                logger.warning(f"No/Empty message received from {client}, skipping")
                 continue
-
-            if q1.client == q2.client:
-                await message_queue.put(q2)
             else:
-                writer.write((q2.message.content + '\n').encode())
-                await writer.drain()
+                received_message = Message(datetime.now(), data.decode().strip())
+
+                logger.info(f"Received from {client}: {received_message.content}")
+                await broadcast_queue.put(ClientMessage(client, received_message))
 
     except asyncio.CancelledError:
-        logger.exception(f"Client handler for {peername} was canceled")
-        clients.pop(peername, None)
+        logger.exception(f"Client handler for {client} was canceled")
     except Exception as e:
-        logger.exception(f"Error with client {peername}: {e}")
+        logger.exception(f"Error with client {client}: {e}")
     finally:
-        logger.info(f"Closing connection for peername: {peername}")
-        writer.close()
-        await writer.wait_closed()
+        if client in connected_clients:
+            connected_clients.remove(client)
+            logger.info(f"Client {client} disconnected, removing from connected clients")
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception as e:
+                logger.error(f"Error closing connection for {client}: {e}")
+        else:
+            logger.warning(f"Client {client} was not in connected clients, skipping cleanup")
 
+async def broadcast_messages():
+    logger = logging.getLogger(LOGGER_NAME)
+
+    while True:
+        client_message: ClientMessage = await broadcast_queue.get()
+        logger.info(f"Broadcasting message from {client_message.client}: {client_message.message.content}")
+
+        disconnected_clients: list[Client] = []
+        for client in list(connected_clients):
+            if client != client_message.client:
+                try:
+                    client.stream_writer.write(
+                        (client_message.message.content + "\n").encode()
+                    )
+                    await client.stream_writer.drain()
+                except (AttributeError,ConnectionResetError, BrokenPipeError, asyncio.CancelledError):
+                    logger.warning(f"Client {client} disconnected, removing")
+                    disconnected_clients.append(client)
+                except Exception as e:
+                    logger.error(f"Error sending message to {client}: {e}")
+                    disconnected_clients.append(client)
+
+        for client in disconnected_clients:
+            connected_clients.discard(client)
+            logger.info(f"Removed disconnected client: {client}")
+
+            try:
+                client.stream_writer.close()
+                await client.stream_writer.wait_closed()
+            except Exception as e:
+                logger.error(f"Error closing connection for {client}: {e}")
+
+        broadcast_queue.task_done()
 
 async def main():
     logger = logging.getLogger(LOGGER_NAME)
     server: asyncio.Server = await asyncio.start_server(
         handle_client, SERVER_ADDRESS, SERVER_PORT
     )
-
     addrs = ", ".join(str(sock.getsockname()) for sock in server.sockets)
     logger.info(f"Serving on {addrs}")
+
+    global broadcast_queue 
+    broadcast_queue = asyncio.Queue(maxsize=100)
+    broadcast_task = asyncio.create_task(broadcast_messages())
+    logger.info("Broadcast task started")
 
     async with server:
         await server.serve_forever()
