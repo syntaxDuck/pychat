@@ -11,6 +11,7 @@ from server import ClientMessage
 class TerminalUI:
     def __init__(self):
         self.term = Terminal()
+        self.print_y_offset = 0
 
     def print_text_box(self):
         print(
@@ -29,6 +30,35 @@ class TerminalUI:
             end="",
             flush=True,
         )
+
+    def print_broadcast(self, message: str):
+        print(
+            self.term.move_xy(0, self.print_y_offset) + message,
+            end="",
+            flush=True,
+        )
+
+        self.print_y_offset += 1
+
+    def print_message(self, message: str):
+        print(
+            self.term.move_xy(0, self.print_y_offset)
+            + (" " * (self.term.width - len(message)))
+            + message,
+            end="",
+            flush=True,
+        )
+
+        self.print_y_offset += 1
+
+        # for i, broadcast in enumerate(broadcasts):
+        #     if i >= self.term.height - 3:
+        #         break
+        #     print(
+        #         self.term.move_xy(0, i)
+        #         + f"{broadcast.client.ip}:{broadcast.client.port} - {broadcast.message.content}"
+        #     )
+        # print(self.term.move_xy(0, self.term.height - 2), end="", flush=True)
 
     def clear(self):
         print(self.term.home + self.term.on_blue + self.term.clear)
@@ -68,6 +98,7 @@ def setup_logging():
 async def handle_broadcasts(stream_reader: asyncio.StreamReader):
     logger = logging.getLogger(LOGGER_NAME)
     read_limit = 1024
+    print_line = 0
     try:
         while True:
             data = await stream_reader.read(read_limit)
@@ -79,10 +110,8 @@ async def handle_broadcasts(stream_reader: asyncio.StreamReader):
             try:
                 client_message = ClientMessage.model_validate(decoded_message)
                 broadcasts.append(client_message)
-                print(
-                    terminal_ui.term.home
-                    + terminal_ui.term.clear_eol
-                    + client_message.message.content
+                terminal_ui.print_broadcast(
+                    f"{client_message.client.ip}:{client_message.client.port} - {client_message.message.content}"
                 )
             except ValidationError as e:
                 logger.error(f"Invalid message format: {e}")
@@ -116,11 +145,23 @@ async def main():
                             if val:
                                 if val.name == "KEY_ENTER" or val == "\n":
                                     break
-                                user_input += str(val)
-                                terminal_ui.print_user_input(user_input)
+                                elif val.name == "KEY_BACKSPACE" or val == "\x7f":
+                                    user_input = user_input[:-1]
+                                elif val.name == "KEY_ESCAPE":
+                                    logger.info(
+                                        "User pressed escape, exiting input loop"
+                                    )
+                                    return
+                                else:
+                                    user_input += str(val)
+                                terminal_ui.print_user_input(
+                                    user_input + terminal_ui.term.clear_eol
+                                )
+
                         print(terminal_ui.term.clear_bol, end="", flush=True)
                         if not user_input.strip():
                             continue
+                        terminal_ui.print_message(user_input)
                         stream_writer.write(user_input.encode() + b"\n")
                         await stream_writer.drain()
                     except ConnectionRefusedError as e:

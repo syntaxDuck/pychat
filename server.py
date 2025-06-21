@@ -87,7 +87,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
     logger = logging.getLogger(LOGGER_NAME)
     read_limit = 1024
     peername = writer.get_extra_info("peername")
-    client: Client = Client(
+    client = Client(
         ip=peername[0], port=peername[1], _reader=reader, _writer=writer
     )
     if client not in connected_clients:
