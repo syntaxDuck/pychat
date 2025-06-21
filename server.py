@@ -1,17 +1,15 @@
+from pydantic import BaseModel, PrivateAttr
 import asyncio
 import logging
 import os
 from datetime import datetime
-from typing import NamedTuple
-from dataclasses import dataclass
 
 LOGGER_NAME = "tcp_server"
 SERVER_ADDRESS = "localhost"
 SERVER_PORT = 5000
 
 
-@dataclass
-class Message:
+class Message(BaseModel):
     timestamp: datetime
     content: str
 
@@ -19,17 +17,16 @@ class Message:
         if isinstance(value, Message):
             return self.timestamp == value.timestamp and self.content == value.content
         return False
-    
+
     def __hash__(self):
         return hash((self.timestamp, self.content))
 
 
-@dataclass
-class Client:
+class Client(BaseModel):
     ip: str
     port: int
-    stream_writer: asyncio.StreamWriter = None
-    stream_reader: asyncio.StreamReader = None
+    _writer: asyncio.StreamWriter = PrivateAttr(default=None)
+    _reader: asyncio.StreamReader = PrivateAttr(default=None)
 
     def __str__(self):
         return f"{self.ip}:{self.port}"
@@ -38,15 +35,17 @@ class Client:
         if isinstance(value, Client):
             return self.ip == value.ip and self.port == value.port
         return False
-    
+
     def __hash__(self):
         return hash((self.ip, self.port))
 
 
-@dataclass
-class ClientMessage:
+class ClientMessage(BaseModel):
     client: Client
     message: Message
+
+    def __str__(self):
+        return f"{self.client}: {self.message.content}\n"
 
 
 broadcast_queue: asyncio.Queue[ClientMessage]
@@ -87,29 +86,34 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
     """
     logger = logging.getLogger(LOGGER_NAME)
     read_limit = 1024
-
-    client: Client = Client(*writer.get_extra_info("peername"))
+    peername = writer.get_extra_info("peername")
+    client: Client = Client(
+        ip=peername[0], port=peername[1], _reader=reader, _writer=writer
+    )
     if client not in connected_clients:
         logger.info(f"Accepted connection from {client}")
-        client.stream_reader = reader
-        client.stream_writer = writer
+        client._reader = reader
+        client._writer = writer
         connected_clients.add(client)
 
     try:
         while True:
-            try:
-                data: bytes = await reader.read(read_limit)
-            except asyncio.TimeoutError:
-                data = None
+            data: bytes = await reader.read(read_limit)
 
-            if data is None or len(data) == 1 and data[0] in (10, 13):
-                logger.warning(f"No/Empty message received from {client}, skipping")
+            if not data:
+                logger.info(f"No data received from {client}, disconnecting.")
+                break
+            elif len(data) == 1 and data[0] in (10, 13):
                 continue
             else:
-                received_message = Message(datetime.now(), data.decode().strip())
+                received_message = Message(
+                    timestamp=datetime.now(), content=data.decode().strip()
+                )
 
                 logger.info(f"Received from {client}: {received_message.content}")
-                await broadcast_queue.put(ClientMessage(client, received_message))
+                await broadcast_queue.put(
+                    ClientMessage(client=client, message=received_message)
+                )
 
     except asyncio.CancelledError:
         logger.exception(f"Client handler for {client} was canceled")
@@ -118,48 +122,60 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
     finally:
         if client in connected_clients:
             connected_clients.remove(client)
-            logger.info(f"Client {client} disconnected, removing from connected clients")
+            logger.info(
+                f"Client {client} disconnected, removing from connected clients"
+            )
             try:
                 writer.close()
                 await writer.wait_closed()
             except Exception as e:
                 logger.error(f"Error closing connection for {client}: {e}")
         else:
-            logger.warning(f"Client {client} was not in connected clients, skipping cleanup")
+            logger.warning(
+                f"Client {client} was not in connected clients, skipping cleanup"
+            )
+
 
 async def broadcast_messages():
     logger = logging.getLogger(LOGGER_NAME)
 
     while True:
         client_message: ClientMessage = await broadcast_queue.get()
-        logger.info(f"Broadcasting message from {client_message.client}: {client_message.message.content}")
+        try:
+            disconnected_clients: list[Client] = []
+            for client in list(connected_clients):
+                if client != client_message.client:
+                    try:
+                        logger.info(
+                            f"Broadcasting message from {client_message.client} -> {client}"
+                        )
+                        encoded_message = (client_message.model_dump_json() + "\n").encode()
+                        client._writer.write(encoded_message)
+                        await client._writer.drain()
+                    except (
+                        AttributeError,
+                        ConnectionResetError,
+                        BrokenPipeError,
+                        asyncio.CancelledError,
+                    ):
+                        logger.warning(f"Client {client} disconnected, removing")
+                        disconnected_clients.append(client)
+                    except Exception as e:
+                        logger.error(f"Error sending message to {client}: {e}")
+                        disconnected_clients.append(client)
 
-        disconnected_clients: list[Client] = []
-        for client in list(connected_clients):
-            if client != client_message.client:
+            for client in disconnected_clients:
+                connected_clients.discard(client)
+                logger.info(f"Removed disconnected client: {client}")
+
                 try:
-                    client.stream_writer.write(
-                        (client_message.message.content + "\n").encode()
-                    )
-                    await client.stream_writer.drain()
-                except (AttributeError,ConnectionResetError, BrokenPipeError, asyncio.CancelledError):
-                    logger.warning(f"Client {client} disconnected, removing")
-                    disconnected_clients.append(client)
+                    client._writer.close()
+                    await client._writer.wait_closed()
                 except Exception as e:
-                    logger.error(f"Error sending message to {client}: {e}")
-                    disconnected_clients.append(client)
+                    logger.error(f"Error closing connection for {client}: {e}")
+        finally:
+            broadcast_queue.task_done()
 
-        for client in disconnected_clients:
-            connected_clients.discard(client)
-            logger.info(f"Removed disconnected client: {client}")
-
-            try:
-                client.stream_writer.close()
-                await client.stream_writer.wait_closed()
-            except Exception as e:
-                logger.error(f"Error closing connection for {client}: {e}")
-
-        broadcast_queue.task_done()
 
 async def main():
     logger = logging.getLogger(LOGGER_NAME)
@@ -169,7 +185,7 @@ async def main():
     addrs = ", ".join(str(sock.getsockname()) for sock in server.sockets)
     logger.info(f"Serving on {addrs}")
 
-    global broadcast_queue 
+    global broadcast_queue
     broadcast_queue = asyncio.Queue(maxsize=100)
     broadcast_task = asyncio.create_task(broadcast_messages())
     logger.info("Broadcast task started")
