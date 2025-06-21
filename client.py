@@ -1,11 +1,10 @@
-import os
 import json
 import asyncio
 import logging
-from datetime import datetime
 from blessed import Terminal
 from pydantic import ValidationError
-from server import ClientMessage
+from models import ClientMessage, Client, Message
+from log import setup_logging
 
 
 class TerminalUI:
@@ -13,7 +12,7 @@ class TerminalUI:
         self.term = Terminal()
         self.print_y_offset = 0
 
-    def print_text_box(self):
+    def render_input_box(self):
         print(
             self.term.move_xy(0, self.term.height - 2)
             + "_" * self.term.width
@@ -24,14 +23,14 @@ class TerminalUI:
             flush=True,
         )
 
-    def print_user_input(self, user_input: str):
+    def render_user_input(self, user_input: str):
         print(
             self.term.move_xy(2, self.term.height) + user_input,
             end="",
             flush=True,
         )
 
-    def print_broadcast(self, message: str):
+    def render_broadcast_message(self, message: str):
         print(
             self.term.move_xy(0, self.print_y_offset) + message,
             end="",
@@ -40,7 +39,7 @@ class TerminalUI:
 
         self.print_y_offset += 1
 
-    def print_message(self, message: str):
+    def render_client_message(self, message: str):
         print(
             self.term.move_xy(0, self.print_y_offset)
             + (" " * (self.term.width - len(message)))
@@ -51,15 +50,6 @@ class TerminalUI:
 
         self.print_y_offset += 1
 
-        # for i, broadcast in enumerate(broadcasts):
-        #     if i >= self.term.height - 3:
-        #         break
-        #     print(
-        #         self.term.move_xy(0, i)
-        #         + f"{broadcast.client.ip}:{broadcast.client.port} - {broadcast.message.content}"
-        #     )
-        # print(self.term.move_xy(0, self.term.height - 2), end="", flush=True)
-
     def clear(self):
         print(self.term.home + self.term.on_blue + self.term.clear)
 
@@ -69,30 +59,6 @@ broadcasts: list[ClientMessage] = []
 LOGGER_NAME = "tcp_client"
 
 
-def setup_logging():
-    os.makedirs("logs", exist_ok=True)
-    log_file = os.path.join(
-        "logs", f"{LOGGER_NAME}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-    )
-
-    logger = logging.getLogger(LOGGER_NAME)
-    logger.setLevel(logging.DEBUG)
-
-    if not logger.hasHandlers():
-        formatter = logging.Formatter(
-            "%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
-        )
-        file_handler = logging.FileHandler(log_file, mode="a", encoding="utf-8")
-        file_handler.setLevel(logging.DEBUG)
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
-
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.ERROR)
-        console_handler.setFormatter(formatter)
-        logger.addHandler(console_handler)
-
-    return logger
 
 
 async def handle_broadcasts(stream_reader: asyncio.StreamReader):
@@ -110,7 +76,7 @@ async def handle_broadcasts(stream_reader: asyncio.StreamReader):
             try:
                 client_message = ClientMessage.model_validate(decoded_message)
                 broadcasts.append(client_message)
-                terminal_ui.print_broadcast(
+                terminal_ui.render_broadcast_message(
                     f"{client_message.client.ip}:{client_message.client.port} - {client_message.message.content}"
                 )
             except ValidationError as e:
@@ -124,8 +90,6 @@ async def handle_broadcasts(stream_reader: asyncio.StreamReader):
 
 
 async def main():
-    logger = setup_logging()
-    logger.info("Client started")
     server_address = ("localhost", 5000)
     try:
         stream_reader, stream_writer = await asyncio.open_connection(*server_address)
@@ -137,7 +101,7 @@ async def main():
                 while True:
                     try:
                         user_input = ""
-                        terminal_ui.print_text_box()
+                        terminal_ui.render_input_box()
                         while True:
                             val = await asyncio.to_thread(
                                 terminal_ui.term.inkey, timeout=0.1
@@ -154,14 +118,14 @@ async def main():
                                     return
                                 else:
                                     user_input += str(val)
-                                terminal_ui.print_user_input(
+                                terminal_ui.render_user_input(
                                     user_input + terminal_ui.term.clear_eol
                                 )
 
                         print(terminal_ui.term.clear_bol, end="", flush=True)
                         if not user_input.strip():
                             continue
-                        terminal_ui.print_message(user_input)
+                        terminal_ui.render_client_message(user_input)
                         stream_writer.write(user_input.encode() + b"\n")
                         await stream_writer.drain()
                     except ConnectionRefusedError as e:
@@ -188,4 +152,6 @@ async def main():
 
 
 if __name__ == "__main__":
+    logger = setup_logging(LOGGER_NAME)
+    logger.info("Starting client application")
     asyncio.run(main())
