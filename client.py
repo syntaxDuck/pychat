@@ -83,6 +83,8 @@ async def handle_broadcasts(stream_reader: asyncio.StreamReader):
                 logger.error(f"Invalid message format: {e}")
                 continue
             logger.info(f"Broadcasts updated: {len(broadcasts)} messages received")
+    except KeyboardInterrupt:
+        logger.info("Broadcast handler interrupted by user.")
     except asyncio.CancelledError:
         logger.info("Broadcast handler cancelled.")
     except Exception as e:

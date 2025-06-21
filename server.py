@@ -8,10 +8,12 @@ LOGGER_NAME = "tcp_server"
 SERVER_ADDRESS = "localhost"
 SERVER_PORT = 5000
 
+
 class MessageServer:
     """
     A simple TCP server that handles client connections and broadcasts messages.
     """
+
     def __init__(self, address: str, port: int):
         self.logger = logging.getLogger(LOGGER_NAME)
         self.logger.info(f"Initializing server at {address}:{port}")
@@ -20,6 +22,7 @@ class MessageServer:
         self.port = port
         self.connected_clients: set[Client] = set()
         self.broadcast_queue: asyncio.Queue[ClientMessage] = asyncio.Queue(maxsize=100)
+        self.lifetime_messages: list[ClientMessage] = []
 
     async def init_server(self):
         """
@@ -27,8 +30,12 @@ class MessageServer:
         """
         self.logger.info(f"Initializing server at {self.address}:{self.port}")
         try:
-            self.server = await asyncio.start_server(self.handle_client, self.address, self.port)
-            self.logger.info(f"Server initialized successfully at {self.address}:{self.port}")
+            self.server = await asyncio.start_server(
+                self.handle_client, self.address, self.port
+            )
+            self.logger.info(
+                f"Server initialized successfully at {self.address}:{self.port}"
+            )
         except Exception as e:
             self.logger.error(f"Failed to initialize server: {e}")
             raise
@@ -52,7 +59,9 @@ class MessageServer:
             self.logger.error(f"Server encountered an error: {e}")
             raise
 
-    async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    async def handle_client(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ):
         """
         Handles communication with a connected client.
 
@@ -85,10 +94,14 @@ class MessageServer:
                         timestamp=datetime.now(), content=data.decode().strip()
                     )
 
-                    self.logger.info(f"Received from {client}: {received_message.content}")
-                    await self.broadcast_queue.put(
-                        ClientMessage(client=client, message=received_message)
+                    self.logger.info(
+                        f"Received from {client}: {received_message.content}"
                     )
+                    client_message = ClientMessage(
+                        client=client, message=received_message
+                    )
+                    await self.broadcast_queue.put(client_message)
+                    self.lifetime_messages.append(client_message)
 
         except asyncio.CancelledError:
             self.logger.exception(f"Client handler for {client} was canceled")
@@ -110,7 +123,6 @@ class MessageServer:
                     f"Client {client} was not in connected clients, skipping cleanup"
                 )
 
-
     async def broadcast_messages(self):
         while True:
             try:
@@ -122,16 +134,21 @@ class MessageServer:
                             self.logger.info(
                                 f"Broadcasting message from {client_message.client} -> {client}"
                             )
-                            encoded_message = (client_message.model_dump_json() + "\n").encode()
+                            encoded_message = (
+                                client_message.model_dump_json() + "\n"
+                            ).encode()
                             client._writer.write(encoded_message)
                             await client._writer.drain()
+                            self.lifetime_messages.append(client_message)
                         except (
                             AttributeError,
                             ConnectionResetError,
                             BrokenPipeError,
                             asyncio.CancelledError,
                         ):
-                            self.logger.warning(f"Client {client} disconnected, removing")
+                            self.logger.warning(
+                                f"Client {client} disconnected, removing"
+                            )
                             disconnected_clients.append(client)
                         except Exception as e:
                             self.logger.error(f"Error sending message to {client}: {e}")
