@@ -90,6 +90,45 @@ async def handle_broadcasts(stream_reader: asyncio.StreamReader):
     except Exception as e:
         logger.error(f"Error in broadcast handler: {e}")
 
+async def user_input_loop(writer: asyncio.StreamWriter):
+    while True:
+        try:
+            user_input = ""
+            terminal_ui.render_input_box()
+            while True:
+                val = await asyncio.to_thread(
+                    terminal_ui.term.inkey, timeout=0.1
+                )
+                if val:
+                    if val.name == "KEY_ENTER" or val == "\n":
+                        break
+                    elif val.name == "KEY_BACKSPACE" or val == "\x7f":
+                        user_input = user_input[:-1]
+                    elif val.name == "KEY_ESCAPE":
+                        logger.info(
+                            "User pressed escape, exiting input loop"
+                        )
+                        return
+                    else:
+                        user_input += str(val)
+                    terminal_ui.render_user_input(
+                        user_input + terminal_ui.term.clear_eol
+                    )
+
+            print(terminal_ui.term.clear_bol, end="", flush=True)
+            if not user_input.strip():
+                continue
+            terminal_ui.render_client_message(user_input)
+            writer.write(user_input.encode() + b"\n")
+            await writer.drain()
+        except ConnectionRefusedError as e:
+            logger.error(f"Connection error: {e}")
+            break
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            logger.info("User input loop cancelled or interrupted by user")
+            break
+
+
 
 async def main():
     server_address = ("localhost", 5000)
@@ -98,46 +137,7 @@ async def main():
         logger.info(f"Connected to server at {server_address}")
         broadcast_task = asyncio.create_task(handle_broadcasts(stream_reader))
         with terminal_ui.term.fullscreen(), terminal_ui.term.cbreak(), terminal_ui.term.hidden_cursor():
-
-            async def user_input_loop():
-                while True:
-                    try:
-                        user_input = ""
-                        terminal_ui.render_input_box()
-                        while True:
-                            val = await asyncio.to_thread(
-                                terminal_ui.term.inkey, timeout=0.1
-                            )
-                            if val:
-                                if val.name == "KEY_ENTER" or val == "\n":
-                                    break
-                                elif val.name == "KEY_BACKSPACE" or val == "\x7f":
-                                    user_input = user_input[:-1]
-                                elif val.name == "KEY_ESCAPE":
-                                    logger.info(
-                                        "User pressed escape, exiting input loop"
-                                    )
-                                    return
-                                else:
-                                    user_input += str(val)
-                                terminal_ui.render_user_input(
-                                    user_input + terminal_ui.term.clear_eol
-                                )
-
-                        print(terminal_ui.term.clear_bol, end="", flush=True)
-                        if not user_input.strip():
-                            continue
-                        terminal_ui.render_client_message(user_input)
-                        stream_writer.write(user_input.encode() + b"\n")
-                        await stream_writer.drain()
-                    except ConnectionRefusedError as e:
-                        logger.error(f"Connection error: {e}")
-                        break
-                    except (asyncio.CancelledError, KeyboardInterrupt):
-                        logger.info("User input loop cancelled or interrupted by user")
-                        break
-
-            await user_input_loop()
+            await user_input_loop(stream_writer)
     except Exception as e:
         logger.error(f"Failed to connect to server: {e}")
     finally:

@@ -109,19 +109,25 @@ class MessageServer:
             self.logger.exception(f"Error with client {client}: {e}")
         finally:
             if client in self.connected_clients:
-                self.connected_clients.remove(client)
-                self.logger.info(
-                    f"Client {client} disconnected, removing from connected clients"
-                )
-                try:
-                    writer.close()
-                    await writer.wait_closed()
-                except Exception as e:
-                    self.logger.error(f"Error closing connection for {client}: {e}")
-            else:
-                self.logger.warning(
-                    f"Client {client} was not in connected clients, skipping cleanup"
-                )
+                await self.remove_client(client)
+
+    async def remove_client(self, client: Client):
+        """
+        Removes a client from the connected clients set and closes its connection.
+
+        Args:
+            client (Client): The client to remove.
+        """
+        if client in self.connected_clients:
+            self.connected_clients.discard(client)
+            self.logger.info(f"Removed disconnected client: {client}")
+            try:
+                client._writer.close()
+                await client._writer.wait_closed()
+            except Exception as e:
+                self.logger.error(f"Error closing connection for {client}: {e}")
+        else:
+            self.logger.warning(f"Client {client} not found in connected clients")
 
     async def broadcast_messages(self):
         while True:
@@ -134,10 +140,7 @@ class MessageServer:
                             self.logger.info(
                                 f"Broadcasting message from {client_message.client} -> {client}"
                             )
-                            encoded_message = (
-                                client_message.model_dump_json() + "\n"
-                            ).encode()
-                            client._writer.write(encoded_message)
+                            client._writer.write(client_message.byte_encode())
                             await client._writer.drain()
                             self.lifetime_messages.append(client_message)
                         except (
@@ -155,14 +158,7 @@ class MessageServer:
                             disconnected_clients.append(client)
 
                 for client in disconnected_clients:
-                    self.connected_clients.discard(client)
-                    self.logger.info(f"Removed disconnected client: {client}")
-
-                    try:
-                        client._writer.close()
-                        await client._writer.wait_closed()
-                    except Exception as e:
-                        self.logger.error(f"Error closing connection for {client}: {e}")
+                    await self.remove_client(client)
             finally:
                 self.broadcast_queue.task_done()
 

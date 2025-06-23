@@ -37,5 +37,8 @@ class ClientMessage(BaseModel):
     client: Client
     message: Message
 
+    def byte_encode(self) -> bytes:
+        return self.model_dump_json().encode()
+ 
     def __str__(self):
         return f"{self.client}: {self.message.content}\n"
