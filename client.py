@@ -2,15 +2,22 @@ import json
 import asyncio
 import logging
 from blessed import Terminal
-from pydantic import ValidationError
-from models import ClientMessage, Client, Message
+from pydantic import ValidationError, BaseModel
+from models import ClientMessage
 from log import setup_logging
 
 
-class TerminalUI:
+class ClientUIState(BaseModel):
+    print_y_offset: int = 0
+    input_buffer: str = ""
+    received_messages: list[ClientMessage] = []
+    sent_messages: list[ClientMessage] = []
+
+
+class ClientUI:
     def __init__(self):
         self.term = Terminal()
-        self.print_y_offset = 0
+        self.state = ClientUIState(term=self.term)
 
     def render_input_box(self):
         print(
@@ -23,48 +30,53 @@ class TerminalUI:
             flush=True,
         )
 
-    def render_user_input(self, user_input: str):
+    def render_user_input(self):
         print(
-            self.term.move_xy(2, self.term.height) + user_input,
+            self.term.move_xy(2, self.term.height)
+            + self.state.input_buffer
+            + self.term.clear_eol,
             end="",
             flush=True,
         )
 
-    def render_broadcast_message(self, message: str):
+    def render_broadcast_message(self):
+        if len(self.state.received_messages) == 0:
+            return
+        broadcast_message = self.state.received_messages.pop(0)
+        formatted_message = f"{broadcast_message.client.ip}:{broadcast_message.client.port} - {broadcast_message.message.content}"
         print(
-            self.term.move_xy(0, self.print_y_offset) + message,
+            self.term.move_xy(0, self.state.print_y_offset)
+            + formatted_message
+            + self.term.clear_eol,
             end="",
             flush=True,
         )
+        self.state.print_y_offset += 1
 
-        self.print_y_offset += 1
-
-    def render_client_message(self, message: str):
+    def render_client_message(self):
+        if len(self.state.sent_messages) == 0:
+            return
+        message = self.state.sent_messages.pop(0)
         print(
-            self.term.move_xy(0, self.print_y_offset)
+            self.term.move_xy(0, self.state.print_y_offset)
             + (" " * (self.term.width - len(message)))
             + message,
             end="",
             flush=True,
         )
-
-        self.print_y_offset += 1
+        self.state.print_y_offset += 1
 
     def clear(self):
         print(self.term.home + self.term.on_blue + self.term.clear)
 
 
-terminal_ui = TerminalUI()
 broadcasts: list[ClientMessage] = []
 LOGGER_NAME = "tcp_client"
 
 
-
-
-async def handle_broadcasts(stream_reader: asyncio.StreamReader):
+async def handle_broadcasts(stream_reader: asyncio.StreamReader, ui: ClientUI):
     logger = logging.getLogger(LOGGER_NAME)
     read_limit = 1024
-    print_line = 0
     try:
         while True:
             data = await stream_reader.read(read_limit)
@@ -75,10 +87,7 @@ async def handle_broadcasts(stream_reader: asyncio.StreamReader):
             logger.debug(decoded_message)
             try:
                 client_message = ClientMessage.model_validate(decoded_message)
-                broadcasts.append(client_message)
-                terminal_ui.render_broadcast_message(
-                    f"{client_message.client.ip}:{client_message.client.port} - {client_message.message.content}"
-                )
+                ui.state.received_messages.append(client_message)
             except ValidationError as e:
                 logger.error(f"Invalid message format: {e}")
                 continue
@@ -90,36 +99,28 @@ async def handle_broadcasts(stream_reader: asyncio.StreamReader):
     except Exception as e:
         logger.error(f"Error in broadcast handler: {e}")
 
-async def user_input_loop(writer: asyncio.StreamWriter):
+
+async def handle_user_input(writer: asyncio.StreamWriter, ui: ClientUI):
     while True:
         try:
-            user_input = ""
-            terminal_ui.render_input_box()
+            ui.state.input_buffer = ""
             while True:
-                val = await asyncio.to_thread(
-                    terminal_ui.term.inkey, timeout=0.1
-                )
+                val = await asyncio.to_thread(ui.term.inkey, timeout=0.1)
                 if val:
                     if val.name == "KEY_ENTER" or val == "\n":
                         break
                     elif val.name == "KEY_BACKSPACE" or val == "\x7f":
-                        user_input = user_input[:-1]
+                        ui.state.input_buffer = ui.state.input_buffer[:-1]
                     elif val.name == "KEY_ESCAPE":
-                        logger.info(
-                            "User pressed escape, exiting input loop"
-                        )
+                        logger.info("User pressed escape, exiting input loop")
                         return
                     else:
-                        user_input += str(val)
-                    terminal_ui.render_user_input(
-                        user_input + terminal_ui.term.clear_eol
-                    )
+                        ui.state.input_buffer += str(val)
 
-            print(terminal_ui.term.clear_bol, end="", flush=True)
-            if not user_input.strip():
+            if not ui.state.input_buffer.strip():
                 continue
-            terminal_ui.render_client_message(user_input)
-            writer.write(user_input.encode() + b"\n")
+            ui.state.sent_messages.append(ui.state.input_buffer)
+            writer.write(ui.state.input_buffer.encode())
             await writer.drain()
         except ConnectionRefusedError as e:
             logger.error(f"Connection error: {e}")
@@ -127,7 +128,18 @@ async def user_input_loop(writer: asyncio.StreamWriter):
         except (asyncio.CancelledError, KeyboardInterrupt):
             logger.info("User input loop cancelled or interrupted by user")
             break
+        except Exception as e:
+            logger.error(f"Error in user input handler: {e}")
+            break
 
+
+async def handle_user_interface(ui: ClientUI):
+    while True:
+        ui.render_input_box()
+        ui.render_user_input()
+        ui.render_client_message()
+        ui.render_broadcast_message()
+        await asyncio.sleep(0.1)
 
 
 async def main():
@@ -135,9 +147,14 @@ async def main():
     try:
         stream_reader, stream_writer = await asyncio.open_connection(*server_address)
         logger.info(f"Connected to server at {server_address}")
-        broadcast_task = asyncio.create_task(handle_broadcasts(stream_reader))
-        with terminal_ui.term.fullscreen(), terminal_ui.term.cbreak(), terminal_ui.term.hidden_cursor():
-            await user_input_loop(stream_writer)
+        ui = ClientUI()
+
+        broadcast_task = asyncio.create_task(handle_broadcasts(stream_reader, ui))
+        user_input_task = asyncio.create_task(handle_user_input(stream_writer, ui))
+
+        with ui.term.fullscreen(), ui.term.cbreak(), ui.term.hidden_cursor():
+            await handle_user_interface(ui)
+
     except Exception as e:
         logger.error(f"Failed to connect to server: {e}")
     finally:
