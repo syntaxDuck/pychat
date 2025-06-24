@@ -5,8 +5,8 @@ from models import Client, ClientMessage, Message
 from log import setup_logging
 
 LOGGER_NAME = "tcp_server"
-SERVER_ADDRESS = "localhost"
-SERVER_PORT = 5000
+SERVER_ADDRESS = "0.0.0.0"
+SERVER_PORT = 5050
 
 
 class MessageServer:
