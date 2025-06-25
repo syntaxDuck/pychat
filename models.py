@@ -1,10 +1,15 @@
 from datetime import datetime
 import asyncio
 from pydantic import BaseModel, PrivateAttr
+from typing import Optional
 
 class Message(BaseModel):
+    origin: str
     timestamp: datetime
     content: str
+    
+    def byte_encode(self) -> bytes:
+        return self.model_dump_json().encode()
 
     def __eq__(self, value):
         if isinstance(value, Message):
@@ -12,14 +17,17 @@ class Message(BaseModel):
         return False
 
     def __hash__(self):
-        return hash((self.timestamp, self.content))
+        return hash((self.origin, self.timestamp, self.content))   
+ 
+    def __str__(self):
+        return f"{self.origin}: {self.message.content}"
 
 
 class Client(BaseModel):
     ip: str
-    port: int
-    _writer: asyncio.StreamWriter = PrivateAttr(default=None)
-    _reader: asyncio.StreamReader = PrivateAttr(default=None)
+    port: Optional[int] = None
+    _writer: Optional[asyncio.StreamWriter] = PrivateAttr(default=None)
+    _reader: Optional[asyncio.StreamReader] = PrivateAttr(default=None)
 
     def __str__(self):
         return f"{self.ip}:{self.port}"
@@ -36,9 +44,3 @@ class Client(BaseModel):
 class ClientMessage(BaseModel):
     client: Client
     message: Message
-
-    def byte_encode(self) -> bytes:
-        return self.model_dump_json().encode()
- 
-    def __str__(self):
-        return f"{self.client}: {self.message.content}"

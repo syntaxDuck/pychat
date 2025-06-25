@@ -90,18 +90,17 @@ class MessageServer:
                 elif len(data) == 1 and data[0] in (10, 13):
                     continue
                 else:
-                    received_message = Message(
-                        timestamp=datetime.now(), content=data.decode().strip()
+                    message = Message(
+                        origin=str(client),
+                        timestamp=datetime.now(),
+                        content=data.decode().strip(),
                     )
 
                     self.logger.info(
-                        f"Received from {client}: {received_message.content}"
+                        f"Received from {client}: {message.content}"
                     )
-                    client_message = ClientMessage(
-                        client=client, message=received_message
-                    )
-                    await self.broadcast_queue.put(client_message)
-                    self.lifetime_messages.append(client_message)
+                    await self.broadcast_queue.put(message)
+                    self.lifetime_messages.append(message)
 
         except asyncio.CancelledError:
             self.logger.exception(f"Client handler for {client} was canceled")
@@ -132,17 +131,17 @@ class MessageServer:
     async def broadcast_messages(self):
         while True:
             try:
-                client_message: ClientMessage = await self.broadcast_queue.get()
+                message: Message = await self.broadcast_queue.get()
                 disconnected_clients: list[Client] = []
                 for client in list(self.connected_clients):
-                    if client != client_message.client:
+                    if str(client) != message.origin:
                         try:
                             self.logger.info(
-                                f"Broadcasting message from {client_message.client} -> {client}"
+                                f"Broadcasting message from {message.origin} -> {client}"
                             )
-                            client._writer.write(client_message.byte_encode())
+                            client._writer.write(message.byte_encode())
                             await client._writer.drain()
-                            self.lifetime_messages.append(client_message)
+                            self.lifetime_messages.append(message)
                         except (
                             AttributeError,
                             ConnectionResetError,
