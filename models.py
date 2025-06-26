@@ -40,7 +40,8 @@ class Client(BaseModel):
     def __hash__(self):
         return hash((self.ip, self.port))
 
-
-class ClientMessage(BaseModel):
-    client: Client
-    message: Message
+class ChatState(BaseModel):
+    input_buffer: str = ""
+    received_messages: list[Message] = []
+    user_messages: list[Message] = []
+    message_history: list[Message] = []
