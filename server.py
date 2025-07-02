@@ -1,12 +1,11 @@
 import asyncio
 import logging
 from datetime import datetime
-from models import Client, ClientMessage, Message
+from models import Client, Message
 from log import setup_logging
+from config import SERVER_HOST, SERVER_PORT
 
 LOGGER_NAME = "tcp_server"
-SERVER_ADDRESS = "0.0.0.0"
-SERVER_PORT = 5050
 
 
 class MessageServer:
@@ -21,8 +20,8 @@ class MessageServer:
         self.address = address
         self.port = port
         self.connected_clients: set[Client] = set()
-        self.broadcast_queue: asyncio.Queue[ClientMessage] = asyncio.Queue(maxsize=100)
-        self.lifetime_messages: list[ClientMessage] = []
+        self.broadcast_queue: asyncio.Queue[Message] = asyncio.Queue(maxsize=100)
+        self.lifetime_messages: list[Message] = []
 
     async def init_server(self):
         """
@@ -62,53 +61,73 @@ class MessageServer:
     async def handle_client(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ):
-        """
-        Handles communication with a connected client.
-
-        Args:
-            reader (asyncio.StreamReader): StreamReader object to read data from the client.
-            writer (asyncio.StreamWriter): StreamWriter object to send data to the client.
-        """
-        read_limit = 1024
+        """Handles communication with a connected client."""
         peername = writer.get_extra_info("peername")
-        client = Client(
-            ip=peername[0], port=peername[1], _reader=reader, _writer=writer
-        )
-        if client not in self.connected_clients:
-            self.logger.info(f"Accepted connection from {client}")
-            client._reader = reader
-            client._writer = writer
-            self.connected_clients.add(client)
+        client = Client(ip=peername[0], port=peername[1], _reader=reader, _writer=writer)
+        await self._register_client(client)
 
         try:
             while True:
-                data: bytes = await reader.read(read_limit)
-
-                if not data:
-                    self.logger.info(f"No data received from {client}, disconnecting.")
+                message = await self._receive_message(client)
+                if message is None:
                     break
-                elif len(data) == 1 and data[0] in (10, 13):
-                    continue
-                else:
-                    message = Message(
-                        origin=str(client),
-                        timestamp=datetime.now(),
-                        content=data.decode().strip(),
-                    )
 
-                    self.logger.info(
-                        f"Received from {client}: {message.content}"
-                    )
-                    await self.broadcast_queue.put(message)
-                    self.lifetime_messages.append(message)
+                await self.broadcast_queue.put(message)
+                self.lifetime_messages.append(message)
 
         except asyncio.CancelledError:
-            self.logger.exception(f"Client handler for {client} was canceled")
+            self.logger.warning(f"Client handler for {client} was cancelled.")
+        except ConnectionResetError:
+            self.logger.warning(f"Client {client} connection reset.")
         except Exception as e:
             self.logger.exception(f"Error with client {client}: {e}")
         finally:
-            if client in self.connected_clients:
-                await self.remove_client(client)
+            await self.remove_client(client)
+
+    async def stop_server(self):
+        """Gracefully shuts down the server."""
+        self.logger.info("Stopping server...")
+        if self.server:
+            self.server.close()
+            await self.server.wait_closed()
+
+        if self._broadcast_task:
+            self._broadcast_task.cancel()
+            try:
+                await self._broadcast_task
+            except asyncio.CancelledError:
+                pass
+
+        for client in list(self.connected_clients):
+            await self.remove_client(client)
+
+        self.logger.info("Server stopped.")
+
+    async def _register_client(self, client: Client):
+        """Registers a new client."""
+        if client not in self.connected_clients:
+            self.logger.info(f"Accepted connection from {client}")
+            self.connected_clients.add(client)
+
+    async def _receive_message(self, client: Client) -> Message | None:
+        """Receives a message from a client."""
+        read_limit = 1024
+        data = await client._reader.read(read_limit)
+
+        if not data:
+            self.logger.info(f"No data received from {client}, disconnecting.")
+            return None
+
+        if len(data) == 1 and data[0] in (10, 13):
+            return None  # Ignore empty messages
+
+        message_content = data.decode().strip()
+        self.logger.info(f"Received from {client}: {message_content}")
+        return Message(
+            origin=str(client),
+            timestamp=datetime.now(),
+            content=message_content,
+        )
 
     async def remove_client(self, client: Client):
         """
@@ -141,7 +160,6 @@ class MessageServer:
                             )
                             client._writer.write(message.byte_encode())
                             await client._writer.drain()
-                            self.lifetime_messages.append(message)
                         except (
                             AttributeError,
                             ConnectionResetError,
@@ -163,8 +181,7 @@ class MessageServer:
 
 
 async def main():
-
-    server = MessageServer(SERVER_ADDRESS, SERVER_PORT)
+    server = MessageServer(SERVER_HOST, SERVER_PORT)
     await server.init_server()
 
     try:
@@ -174,10 +191,13 @@ async def main():
     except Exception as e:
         logging.getLogger(LOGGER_NAME).error(f"Server encountered an error: {e}")
     finally:
-        logging.getLogger(LOGGER_NAME).info("Server stopped.")
+        await server.stop_server()
 
 
 if __name__ == "__main__":
     app_logger = setup_logging(LOGGER_NAME, console_handler_level=logging.INFO)
     app_logger.info("Starting TCP server")
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    finally:
+        logging.shutdown()

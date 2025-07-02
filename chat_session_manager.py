@@ -70,47 +70,60 @@ class ChatSessionManager:
             raise
 
     async def handle_broadcasts(self, stream_reader: asyncio.StreamReader):
+        """Handles incoming broadcast messages from the server."""
         read_limit = 1024
         try:
             while True:
                 data = await stream_reader.read(read_limit)
-                if not data or len(data) == 1 and data[0] in (10, 13):
-                    continue
-                decoded_message = json.loads(data.decode())
-                self.logger.info(f"Received message from {decoded_message['origin']}")
-                self.logger.debug(decoded_message)
-                try:
-                    client_message = Message.model_validate(decoded_message)
-                    self.state.received_messages.append(client_message)
-                    await self.message_queue.put(client_message)
-                except ValidationError as e:
-                    self.logger.error(f"Invalid message format: {e}")
-                    continue
-                self.logger.info(
-                    f"Broadcasts updated: {len(self.state.received_messages)} messages received"
-                )
+                if not data:
+                    self.logger.warning("Server closed the connection.")
+                    break
+
+                message = self._parse_message(data)
+                if message:
+                    self.state.received_messages.append(message)
+                    await self.message_queue.put(message)
+
+        except asyncio.CancelledError:
+            self.logger.info("Broadcast handler cancelled.")
+        except ConnectionResetError:
+            self.logger.warning("Connection to the server was reset.")
         except Exception as e:
-            self.logger.error(f"Error in broadcast handler: {e}")
-            raise
+            self.logger.exception(f"Error in broadcast handler: {e}")
+        finally:
+            self.logger.info("Broadcast handler stopped.")
+
+    def _parse_message(self, data: bytes) -> Message | None:
+        """Parses a message from the server."""
+        try:
+            decoded_message = json.loads(data.decode())
+            self.logger.info(f"Received message from {decoded_message['origin']}")
+            self.logger.debug(decoded_message)
+            return Message.model_validate(decoded_message)
+        except (json.JSONDecodeError, ValidationError) as e:
+            self.logger.error(f"Invalid message format: {e}")
+            return None
 
     async def handle_user_input(self, writer: asyncio.StreamWriter):
+        """Handles user input and sends it to the server."""
         while True:
             try:
                 self.state.input_buffer = ""
                 while True:
-                    val = await asyncio.to_thread(self.term.inkey, timeout=0.5)
-                    if val:
-                        if val.name == "KEY_ENTER" or val == "\n":
+                    val = await asyncio.to_thread(self.term.inkey, timeout=0.1)
+                    if not val:
+                        continue
+
+                    if val.is_sequence:
+                        if val.name == "KEY_ENTER":
                             break
-                        elif val.name == "KEY_BACKSPACE" or val == "\x7f":
+                        elif val.name == "KEY_BACKSPACE":
                             self.state.input_buffer = self.state.input_buffer[:-1]
                         elif val.name == "KEY_ESCAPE":
-                            self.logger.info("User pressed escape, exiting input loop")
+                            self.logger.info("User pressed escape, exiting...")
                             return
-                        elif "\x1b" in val:  # Handle escape sequences
-                            pass
-                        else:
-                            self.state.input_buffer += str(val)
+                    else:
+                        self.state.input_buffer += val
 
                 if not self.state.input_buffer.strip():
                     continue
@@ -125,6 +138,11 @@ class ChatSessionManager:
                 await self.message_queue.put(message)
                 writer.write(self.state.input_buffer.encode())
                 await writer.drain()
+
+            except asyncio.CancelledError:
+                self.logger.info("User input handler cancelled.")
+                break
             except Exception as e:
-                self.logger.error(f"Error in user input handler: {e}")
-                raise
+                self.logger.exception(f"Error in user input handler: {e}")
+                break
+        self.logger.info("User input handler stopped.")

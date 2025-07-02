@@ -20,7 +20,7 @@ class Message(BaseModel):
         return hash((self.origin, self.timestamp, self.content))   
  
     def __str__(self):
-        return f"{self.origin}: {self.message.content}"
+        return f"{self.origin}: {self.content}"
 
 
 class Client(BaseModel):

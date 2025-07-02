@@ -1,0 +1,3 @@
+SERVER_HOST = "0.0.0.0"
+SERVER_PORT = 5050
+CLIENT_HOST = "localhost"

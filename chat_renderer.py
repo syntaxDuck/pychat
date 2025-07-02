@@ -102,7 +102,7 @@ class ChatRenderer(Protocol):
                 offset = len(user_message)
                 formatted_message = " " * (self._term.width - offset) + user_message
             else:
-                formatted_message = f"{message.origin} - {message.content}"
+                formatted_message = f"{message.origin}┠─ {message.content}"
             print(
                 self._term.move_xy(0, self.y_offset)
                 + formatted_message
