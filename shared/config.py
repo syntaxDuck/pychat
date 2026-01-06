@@ -1,3 +1,4 @@
 SERVER_HOST = "0.0.0.0"
 SERVER_PORT = 5050
+SERVER_LOGGER_NAME = "server_logger"
 CLIENT_HOST = "localhost"

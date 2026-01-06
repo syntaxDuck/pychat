@@ -1,10 +1,8 @@
-import asyncio
 import logging
 from blessed import Terminal
 from enum import Enum
 from pydantic import BaseModel
-from models import Message
-from typing import Protocol
+from shared.models import Message
 
 
 class Color(Enum):
@@ -24,12 +22,12 @@ class ChatRenderConfig(BaseModel):
     user_identifier: str = "Me"
 
 
-class ChatRenderer(Protocol):
+class ChatRenderer:
     def __init__(
         self,
         config: ChatRenderConfig = ChatRenderConfig(),
     ):
-        self._term: Terminal | None = None
+        self._term: Terminal
         self.render_config: ChatRenderConfig = config
         self.logger = logging.getLogger("chat_renderer")
 
@@ -46,9 +44,7 @@ class ChatRenderer(Protocol):
             raise TypeError("term must be an instance of blessed.Terminal")
         self._term = value
 
-    def render_user_interface(
-        self, input_buffer: str, message_history: list[Message]
-    ):
+    def render_user_interface(self, input_buffer: str, message_history: list[Message]):
         try:
             self.y_offset = 0
             self.clear()

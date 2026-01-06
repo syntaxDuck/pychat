@@ -1,20 +1,18 @@
-import asyncio
 import logging
-from datetime import datetime
-from models import Client, Message
-from log import setup_logging
-from config import SERVER_HOST, SERVER_PORT
+import asyncio
 
-LOGGER_NAME = "tcp_server"
+from .client import Client
+from shared.models import Message
+from shared.config import SERVER_LOGGER_NAME
 
 
-class MessageServer:
+class ChatServer:
     """
     A simple TCP server that handles client connections and broadcasts messages.
     """
 
     def __init__(self, address: str, port: int):
-        self.logger = logging.getLogger(LOGGER_NAME)
+        self.logger = logging.getLogger(SERVER_LOGGER_NAME)
         self.logger.info(f"Initializing server at {address}:{port}")
 
         self.address = address
@@ -49,7 +47,7 @@ class MessageServer:
         try:
             async with self.server:
                 await self.server.serve_forever()
-                self.logger.info("Server is now serving forever")
+                self.logger.info("Chat Server Ready")
         except asyncio.CancelledError:
             self.logger.info("Server shutdown requested, stopping broadcast task")
             self._broadcast_task.cancel()
@@ -63,12 +61,13 @@ class MessageServer:
     ):
         """Handles communication with a connected client."""
         peername = writer.get_extra_info("peername")
-        client = Client(ip=peername[0], port=peername[1], _reader=reader, _writer=writer)
+        client = Client(ip=peername[0], port=peername[1], reader=reader, writer=writer)
+
         await self._register_client(client)
 
         try:
             while True:
-                message = await self._receive_message(client)
+                message = await client.receive_message()
                 if message is None:
                     break
 
@@ -109,26 +108,6 @@ class MessageServer:
             self.logger.info(f"Accepted connection from {client}")
             self.connected_clients.add(client)
 
-    async def _receive_message(self, client: Client) -> Message | None:
-        """Receives a message from a client."""
-        read_limit = 1024
-        data = await client._reader.read(read_limit)
-
-        if not data:
-            self.logger.info(f"No data received from {client}, disconnecting.")
-            return None
-
-        if len(data) == 1 and data[0] in (10, 13):
-            return None  # Ignore empty messages
-
-        message_content = data.decode().strip()
-        self.logger.info(f"Received from {client}: {message_content}")
-        return Message(
-            origin=str(client),
-            timestamp=datetime.now(),
-            content=message_content,
-        )
-
     async def remove_client(self, client: Client):
         """
         Removes a client from the connected clients set and closes its connection.
@@ -140,8 +119,8 @@ class MessageServer:
             self.connected_clients.discard(client)
             self.logger.info(f"Removed disconnected client: {client}")
             try:
-                client._writer.close()
-                await client._writer.wait_closed()
+                client.writer.close()
+                await client.writer.wait_closed()
             except Exception as e:
                 self.logger.error(f"Error closing connection for {client}: {e}")
         else:
@@ -158,8 +137,8 @@ class MessageServer:
                             self.logger.info(
                                 f"Broadcasting message from {message.origin} -> {client}"
                             )
-                            client._writer.write(message.byte_encode())
-                            await client._writer.drain()
+                            client.writer.write(message.byte_encode())
+                            await client.writer.drain()
                         except (
                             AttributeError,
                             ConnectionResetError,
@@ -178,26 +157,3 @@ class MessageServer:
                     await self.remove_client(client)
             finally:
                 self.broadcast_queue.task_done()
-
-
-async def main():
-    server = MessageServer(SERVER_HOST, SERVER_PORT)
-    await server.init_server()
-
-    try:
-        await server.start_server()
-    except KeyboardInterrupt:
-        logging.getLogger(LOGGER_NAME).info("Server shutdown requested, stopping...")
-    except Exception as e:
-        logging.getLogger(LOGGER_NAME).error(f"Server encountered an error: {e}")
-    finally:
-        await server.stop_server()
-
-
-if __name__ == "__main__":
-    app_logger = setup_logging(LOGGER_NAME, console_handler_level=logging.INFO)
-    app_logger.info("Starting TCP server")
-    try:
-        asyncio.run(main())
-    finally:
-        logging.shutdown()

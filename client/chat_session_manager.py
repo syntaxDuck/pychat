@@ -1,12 +1,21 @@
 import asyncio
-import logging
 import json
+import logging
 from datetime import datetime
-from blessed import Terminal
-from pydantic import ValidationError
 
-from models import Message, ChatState
-from chat_renderer import ChatRenderer
+from blessed import Terminal
+from pydantic import BaseModel, ValidationError
+
+from shared.models import Message
+
+from .chat_renderer import ChatRenderer
+
+
+class ChatState(BaseModel):
+    input_buffer: str = ""
+    received_messages: list[Message] = []
+    user_messages: list[Message] = []
+    message_history: list[Message] = []
 
 
 class ChatSessionManager:
