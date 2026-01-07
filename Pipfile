@@ -7,6 +7,7 @@ name = "pypi"
 rich = "*"
 blessed = "*"
 pydantic = "*"
+pydantic-settings = "*"
 
 [dev-packages]
 

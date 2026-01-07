@@ -2,30 +2,32 @@ import asyncio
 import logging
 
 from server.chat_server import ChatServer
-from shared.config import SERVER_HOST, SERVER_PORT
 from shared.log import setup_logging
-from shared.config import SERVER_LOGGER_NAME
+from shared.config import server_config
 
 
 async def main():
-    server = ChatServer(SERVER_HOST, SERVER_PORT)
+    server = ChatServer(server_config.host, server_config.port)
     await server.init_server()
 
     try:
         await server.start_server()
     except KeyboardInterrupt:
-        logging.getLogger(SERVER_LOGGER_NAME).info(
+        logging.getLogger(server_config.logger_name).info(
             "Server shutdown requested, stopping..."
         )
     except Exception as e:
-        logging.getLogger(SERVER_LOGGER_NAME).error(f"Server encountered an error: {e}")
+        logging.getLogger().error(f"Server encountered an error: {e}")
     finally:
         await server.stop_server()
 
 
 if __name__ == "__main__":
-    app_logger = setup_logging(SERVER_LOGGER_NAME, console_handler_level=logging.INFO)
-    app_logger.info("Starting TCP server")
+    server_logger = setup_logging(
+        server_config.logger_name,
+        console_handler_level=getattr(logging, server_config.log_level),
+    )
+    server_logger.info("Starting chat server")
     try:
         asyncio.run(main())
     finally:
